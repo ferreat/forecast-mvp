@@ -8,6 +8,7 @@
 
 ## Key behaviors
 - Weekly sample data included (up to ~5 years).
+- In-app data source selector: upload CSV, built-in 5y sample, or built-in 3y sample (weekly).
 - Default forecast horizon is **T+6** weeks (configurable).
 - Seasonality defaults to **52** but can be challenged via autocorrelation suggestion.
 - UI shows per-model MAE/RMSE/MAPE, picks best model, and plots historic + best forecast with metric in title.
@@ -31,7 +32,9 @@ streamlit run app.py
 > If Prophet fails with pip, use Conda.
 
 ## Sample dataset
-Upload: `sample_data/sample_weekly_sales_5y.csv`
+Built-in sample (5y) and built-in sample (3y) are selectable directly in the app.
+
+If you want to upload manually, use: `sample_data/sample_weekly_sales_5y.csv`
 Map:
 - Date column: `week_start`
 - Target column: `sales`

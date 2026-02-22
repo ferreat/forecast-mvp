@@ -160,32 +160,64 @@ with tab_forecast:
 
     with left:
         st.markdown('<div class="panel">', unsafe_allow_html=True)
-        st.subheader("Upload weekly sales data")
-        upload = st.file_uploader("CSV upload", type=["csv"], label_visibility="collapsed")
-        st.caption("Use the sample file in `sample_data/` to test quickly.")
+        st.subheader("Data source")
+        data_source = st.radio(
+            "Choose input",
+            ["Upload CSV", "Built-in sample (5y)", "Built-in sample (3y)"],
+            label_visibility="collapsed",
+        )
+        st.caption("Upload your own CSV or use the built-in weekly sample dataset.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        if upload is None:
-            st.stop()
+        if data_source == "Upload CSV":
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.subheader("Upload weekly sales data")
+            upload = st.file_uploader("CSV upload", type=["csv"], label_visibility="collapsed")
+            st.markdown("</div>", unsafe_allow_html=True)
+            if upload is None:
+                st.stop()
 
-        size_mb = len(upload.getvalue()) / (1024 * 1024)
-        if size_mb > SETTINGS.max_upload_mb:
-            st.error(f"File too large ({size_mb:.1f}MB). Max is {SETTINGS.max_upload_mb}MB.")
-            st.stop()
+            dataset_bytes = upload.getvalue()
+            size_mb = len(dataset_bytes) / (1024 * 1024)
+            if size_mb > SETTINGS.max_upload_mb:
+                st.error(f"File too large ({size_mb:.1f}MB). Max is {SETTINGS.max_upload_mb}MB.")
+                st.stop()
 
-        df_raw = pd.read_csv(upload)
+            dataset_filename = upload.name
+            df_raw = pd.read_csv(upload)
+            series_label = "uploaded"
+        else:
+            sample_path = Path("sample_data/sample_weekly_sales_5y.csv")
+            if not sample_path.exists():
+                st.error("Built-in sample file is missing at sample_data/sample_weekly_sales_5y.csv.")
+                st.stop()
+            df_raw = pd.read_csv(sample_path)
+            if data_source == "Built-in sample (3y)":
+                df_raw = df_raw.tail(156).reset_index(drop=True)
+                dataset_filename = "sample_weekly_sales_3y.csv"
+                series_label = "sample (3y)"
+            else:
+                dataset_filename = "sample_weekly_sales_5y.csv"
+                series_label = "sample (5y)"
+            dataset_bytes = df_raw.to_csv(index=False).encode("utf-8")
+
         cols = list(df_raw.columns)
         if len(cols) < 2:
             st.error("CSV must contain at least two columns (date + sales).")
             st.stop()
 
+        date_default = cols.index("week_start") if "week_start" in cols else 0
+        value_default = cols.index("sales") if "sales" in cols else min(1, len(cols) - 1)
+        if value_default == date_default and len(cols) > 1:
+            value_default = 1 if date_default == 0 else 0
+
         st.markdown('<div class="panel">', unsafe_allow_html=True)
         st.subheader("Map columns")
         cc1, cc2 = st.columns(2)
         with cc1:
-            date_col = st.selectbox("Date column", cols, index=0)
+            date_col = st.selectbox("Date column", cols, index=date_default)
         with cc2:
-            value_col = st.selectbox("Sales column", cols, index=1)
+            value_col = st.selectbox("Sales column", cols, index=value_default)
         st.caption("If data isn't perfectly weekly, we resample to W-MON by summing.")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -204,8 +236,8 @@ with tab_forecast:
             st.info(f"Auto-suggested seasonality: **{effective_season}**. Scores: {suggested['scores']}")
 
         st.markdown('<div class="panel">', unsafe_allow_html=True)
-        st.subheader("Weekly sales (uploaded)")
-        plot_ts(df_norm, title="Weekly sales (uploaded)", key="chart_uploaded")
+        st.subheader(f"Weekly sales ({series_label})")
+        plot_ts(df_norm, title=f"Weekly sales ({series_label})", key=f"chart_{series_label.replace(' ', '_')}")
         with st.expander("Show last 30 rows"):
             st.dataframe(df_norm.tail(30), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
@@ -242,10 +274,11 @@ with tab_forecast:
 
             with st.status("Running forecast pipeline…", expanded=True) as status:
                 progress = st.progress(0)
-                status.write("Saving upload + consuming quota…")
+                status.write("Saving dataset snapshot + consuming quota…")
                 consume_run(conn, user_id)
 
                 params = {
+                    "data_source": data_source,
                     "forecast_horizon": int(forecast_horizon),
                     "eval_horizon": int(eval_horizon),
                     "season_length_weeks": int(effective_season),
@@ -255,7 +288,7 @@ with tab_forecast:
                 }
 
                 pre_job_id = str(uuid.uuid4())
-                dataset_path = save_upload(upload.getvalue(), upload.name, pre_job_id)
+                dataset_path = save_upload(dataset_bytes, dataset_filename, pre_job_id)
                 job_id = create_job(user_id, str(dataset_path), params)
                 jp = job_dir(job_id)
                 write_json(jp / "params.json", params)
