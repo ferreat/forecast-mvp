@@ -1,44 +1,71 @@
 from __future__ import annotations
 
-import json
-import uuid
 import datetime as dt
+import json
 import time
+import uuid
 from pathlib import Path
 
 import pandas as pd
-import streamlit as st
 import plotly.graph_objects as go
+import streamlit as st
 
 from mvp.config import SETTINGS
-from mvp.db import connect, init_db
-from mvp.quota import can_run, consume_run
-from mvp.storage import ensure_dirs, job_dir, save_upload, write_json, save_csv
-
-from mvp.core.data_validation import validate_and_normalize
-from mvp.core.preprocessing import simple_fill_missing, enforce_weekly
-from mvp.core.seasonality import suggest_season_length
 from mvp.core.backtest import holdout_backtest
-
-from mvp.models.ets import fit_predict as ets_fit_predict
+from mvp.core.preprocessing import enforce_weekly, simple_fill_missing
+from mvp.core.seasonality import suggest_season_length
+from mvp.db import connect, init_db
 from mvp.models.arima import fit_predict as arima_fit_predict
+from mvp.models.ets import fit_predict as ets_fit_predict
 from mvp.models.prophet_model import fit_predict as prophet_fit_predict
 from mvp.models.xgb_lags import fit_predict as xgb_fit_predict
+from mvp.quota import can_run, consume_run
+from mvp.storage import ensure_dirs, job_dir, save_csv, save_upload, write_json
 
 st.set_page_config(page_title=SETTINGS.app_name, layout="wide")
 
-st.markdown("""
+st.markdown(
+    """
 <style>
   .app-title {font-size: 1.8rem; font-weight: 780; margin-bottom: 0.25rem;}
   .subtle {color: rgba(49, 51, 63, 0.7);}
   .panel {border: 1px solid rgba(49, 51, 63, 0.12); padding: 14px; border-radius: 14px; background: white;}
   .pill {display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 0.85rem; border: 1px solid rgba(49, 51, 63, 0.15);}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 ensure_dirs()
 conn = connect()
 init_db(conn)
+
+
+@st.cache_data
+def load_peru_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+    sales_path = Path("sample_data/peru_weekly_sales_3y_by_region.csv")
+    meta_path = Path("sample_data/peru_regions_meta.csv")
+    if not sales_path.exists() or not meta_path.exists():
+        raise FileNotFoundError(
+            "Missing Peru sample data. Expected sample_data/peru_weekly_sales_3y_by_region.csv and "
+            "sample_data/peru_regions_meta.csv"
+        )
+
+    sales = pd.read_csv(sales_path)
+    meta = pd.read_csv(meta_path)
+
+    sales["week_start"] = pd.to_datetime(sales["week_start"])
+    sales["sales"] = pd.to_numeric(sales["sales"], errors="coerce")
+    sales = sales.dropna(subset=["region", "week_start", "sales"]).sort_values(["region", "week_start"])
+    meta = meta.dropna(subset=["region", "lat", "lon"]).copy()
+    meta["lat"] = pd.to_numeric(meta["lat"], errors="coerce")
+    meta["lon"] = pd.to_numeric(meta["lon"], errors="coerce")
+    meta = meta.dropna(subset=["lat", "lon"])
+
+    valid_regions = set(meta["region"].astype(str))
+    sales = sales[sales["region"].astype(str).isin(valid_regions)].copy()
+    return sales, meta
+
 
 def get_or_create_user(email: str) -> int:
     now = dt.datetime.now().isoformat()
@@ -50,11 +77,13 @@ def get_or_create_user(email: str) -> int:
     conn.commit()
     return int(conn.execute("SELECT id FROM users WHERE email=?", (norm,)).fetchone()[0])
 
+
 def list_jobs(user_id: int):
     return conn.execute(
         "SELECT id, created_at, status, best_model FROM jobs WHERE user_id=? ORDER BY created_at DESC",
         (user_id,),
     ).fetchall()
+
 
 def load_job(job_id: str):
     return conn.execute(
@@ -63,12 +92,14 @@ def load_job(job_id: str):
         (job_id,),
     ).fetchone()
 
+
 def update_job(job_id: str, **fields):
     keys = list(fields.keys())
     values = [fields[k] for k in keys]
     set_clause = ", ".join([f"{k}=?" for k in keys])
     conn.execute(f"UPDATE jobs SET {set_clause} WHERE id=?", (*values, job_id))
     conn.commit()
+
 
 def create_job(user_id: int, dataset_path: str, params: dict) -> str:
     job_id = str(uuid.uuid4())
@@ -80,20 +111,48 @@ def create_job(user_id: int, dataset_path: str, params: dict) -> str:
     conn.commit()
     return job_id
 
+
 def choose_best(metrics_by_model: dict) -> str:
-    # Lower is better
-    def key(m):
-        return (metrics_by_model[m]["MAPE"], metrics_by_model[m]["MAE"])
+    def key(model: str):
+        return (metrics_by_model[model]["MAPE"], metrics_by_model[model]["MAE"])
+
     return sorted(metrics_by_model.keys(), key=key)[0]
 
+
+def region_series(df_sales: pd.DataFrame, region: str) -> pd.DataFrame:
+    df = df_sales[df_sales["region"] == region][["week_start", "sales"]].copy()
+    df = df.rename(columns={"week_start": "ds", "sales": "y"})
+    df["ds"] = pd.to_datetime(df["ds"]) 
+    df["y"] = pd.to_numeric(df["y"], errors="coerce")
+    df = df.dropna(subset=["ds", "y"]).sort_values("ds")
+    df = simple_fill_missing(df)
+    df = enforce_weekly(df)
+    return df
+
+
 def plot_ts(df: pd.DataFrame, fc: pd.DataFrame | None = None, title: str = "Weekly sales", key: str | None = None):
-    actual_color = "#2563eb"
-    forecast_color = "#f97316"
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["ds"], y=df["y"], mode="lines", name="Actual", line=dict(color=actual_color, width=2)))
-    if fc is not None:
-        fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat"], mode="lines", name="Forecast", line=dict(color=forecast_color, width=3)))
-        fig.add_vline(x=fc["ds"].min(), line_width=2, line_dash="dash", line_color=forecast_color)
+    fig.add_trace(
+        go.Scatter(
+            x=df["ds"],
+            y=df["y"],
+            mode="lines",
+            name="Actual",
+            line=dict(color="#2563eb", width=2),
+        )
+    )
+    if fc is not None and not fc.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=fc["ds"],
+                y=fc["yhat"],
+                mode="lines",
+                name="Forecast",
+                line=dict(color="#f97316", width=3),
+            )
+        )
+        fig.add_vline(x=fc["ds"].min(), line_width=2, line_dash="dash", line_color="#f97316")
+
     fig.update_layout(
         title=title,
         xaxis_title="Week",
@@ -103,13 +162,132 @@ def plot_ts(df: pd.DataFrame, fc: pd.DataFrame | None = None, title: str = "Week
         margin=dict(l=10, r=10, t=60, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    st.plotly_chart(fig, use_container_width=True, key=key)
+    return st.plotly_chart(fig, use_container_width=True, key=key)
+
+
+def plot_peru_map(meta: pd.DataFrame, selected_region: str, key: str):
+    marker_colors = ["#ea580c" if r == selected_region else "#2563eb" for r in meta["region"]]
+    marker_sizes = [16 if r == selected_region else 10 for r in meta["region"]]
+
+    fig = go.Figure(
+        go.Scattergeo(
+            lon=meta["lon"],
+            lat=meta["lat"],
+            customdata=meta["region"],
+            text=meta["region"],
+            mode="markers",
+            marker=dict(size=marker_sizes, color=marker_colors, opacity=0.9, line=dict(width=0.5, color="#ffffff")),
+            hovertemplate="<b>%{customdata}</b><extra></extra>",
+        )
+    )
+
+    fig.update_geos(
+        scope="south america",
+        resolution=50,
+        center=dict(lat=-9.4, lon=-75.2),
+        projection_type="mercator",
+        lataxis_range=[-19.5, 1.8],
+        lonaxis_range=[-82.5, -67.5],
+        showland=True,
+        landcolor="rgb(239,246,255)",
+        showcountries=True,
+        countrycolor="rgb(148,163,184)",
+        showocean=True,
+        oceancolor="rgb(240,249,255)",
+    )
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=10, b=0),
+        height=380,
+        title=f"Peru regions (selected: {selected_region})",
+    )
+    return st.plotly_chart(fig, use_container_width=True, key=key, on_select="rerun")
+
+
+def extract_clicked_region(meta: pd.DataFrame, map_event: object) -> str | None:
+    if not isinstance(map_event, dict):
+        return None
+    selection = map_event.get("selection")
+    if not isinstance(selection, dict):
+        return None
+    points = selection.get("points")
+    if not isinstance(points, list) or not points:
+        return None
+
+    point = points[0]
+    custom = point.get("customdata")
+    if isinstance(custom, str) and custom:
+        return custom
+    if isinstance(custom, list) and custom and isinstance(custom[0], str):
+        return custom[0]
+
+    idx = point.get("point_index")
+    if idx is None:
+        idx = point.get("pointNumber")
+    if isinstance(idx, int) and 0 <= idx < len(meta):
+        return str(meta.iloc[idx]["region"])
+    return None
+
+
+def trim_history_for_forecast(df_hist: pd.DataFrame, df_fc: pd.DataFrame, history_weeks: int = 26) -> pd.DataFrame:
+    if df_fc.empty:
+        return df_hist
+    cutoff = df_fc["ds"].min() - pd.Timedelta(weeks=history_weeks)
+    return df_hist[df_hist["ds"] >= cutoff]
+
+
+def run_models_for_region(
+    df_norm: pd.DataFrame,
+    selected_models: list[str],
+    eval_horizon: int,
+    forecast_horizon: int,
+    effective_season: int,
+    effective_season_lag: int,
+) -> tuple[dict, pd.DataFrame, str]:
+    eh = int(eval_horizon)
+    if len(df_norm) <= eh + 10:
+        eh = max(8, min(26, max(8, len(df_norm) // 5)))
+
+    metrics_by_model = {}
+
+    def run_backtest(fn):
+        _, met = holdout_backtest(df_norm, eh, lambda tr, h, f: fn(tr, h, f))
+        return met
+
+    if "ETS" in selected_models:
+        metrics_by_model["ETS"] = run_backtest(lambda tr, h, f: ets_fit_predict(tr, h, f, int(effective_season)))
+    if "ARIMA" in selected_models:
+        metrics_by_model["ARIMA"] = run_backtest(lambda tr, h, f: arima_fit_predict(tr, h, f, order=(1, 1, 1)))
+    if "Prophet" in selected_models:
+        metrics_by_model["Prophet"] = run_backtest(
+            lambda tr, h, f: prophet_fit_predict(tr, h, f, season_length_weeks=int(effective_season))
+        )
+    if "XGBoost" in selected_models:
+        metrics_by_model["XGBoost"] = run_backtest(lambda tr, h, f: xgb_fit_predict(tr, h, f, season_lag=int(effective_season_lag)))
+
+    best = choose_best(metrics_by_model)
+    freq = pd.infer_freq(df_norm["ds"]) or "W-MON"
+    fh = int(forecast_horizon)
+
+    if best == "ETS":
+        fc = ets_fit_predict(df_norm, fh, freq, int(effective_season))
+    elif best == "ARIMA":
+        fc = arima_fit_predict(df_norm, fh, freq, order=(1, 1, 1))
+    elif best == "Prophet":
+        fc = prophet_fit_predict(df_norm, fh, freq, season_length_weeks=int(effective_season))
+    else:
+        fc = xgb_fit_predict(df_norm, fh, freq, season_lag=int(effective_season_lag))
+
+    return metrics_by_model, fc, best
+
 
 # Header
 cA, cB = st.columns([3, 1])
 with cA:
     st.markdown(f'<div class="app-title">{SETTINGS.app_name}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="subtle">Weekly sales forecasting • ETS / ARIMA / Prophet / XGBoost • Offline MVP</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtle">Peru regional weekly forecasting (3 years) • ETS / ARIMA / Prophet / XGBoost</div>',
+        unsafe_allow_html=True,
+    )
 with cB:
     st.markdown('<div class="pill">Offline demo</div>', unsafe_allow_html=True)
 st.write("")
@@ -133,12 +311,18 @@ with st.sidebar:
 
     st.divider()
     st.header("Forecast settings")
-    forecast_horizon = st.number_input("Forecast horizon (weeks)", 1, 52, SETTINGS.default_forecast_horizon, help="Default is T+6.")
+    forecast_horizon = st.number_input(
+        "Forecast horizon (weeks)", 1, 52, SETTINGS.default_forecast_horizon, help="Default is T+6."
+    )
     eval_horizon = st.number_input("Holdout window (weeks)", 8, 104, SETTINGS.default_eval_horizon)
 
     auto_season = st.checkbox("Auto-suggest seasonality", value=True, help="Autocorrelation over 4/13/26/52.")
-    season_length = st.number_input("Season length (weeks)", 1, 104, SETTINGS.default_season_length, disabled=auto_season)
-    season_lag = st.number_input("Seasonal lag for XGBoost", 4, 104, SETTINGS.default_season_length, disabled=auto_season)
+    season_length = st.number_input(
+        "Season length (weeks)", 1, 104, SETTINGS.default_season_length, disabled=auto_season
+    )
+    season_lag = st.number_input(
+        "Seasonal lag for XGBoost", 4, 104, SETTINGS.default_season_length, disabled=auto_season
+    )
 
     st.divider()
     st.header("Models")
@@ -147,11 +331,33 @@ with st.sidebar:
     use_prophet = st.checkbox("Prophet", value=True)
     use_xgb = st.checkbox("XGBoost (lags)", value=True)
 
-    st.caption("No optimization in this MVP. Defaults chosen to work well across many weekly series.")
-
 if not user_id:
     st.info("Sign in from the sidebar to start.")
     st.stop()
+
+try:
+    sales_df, meta_df = load_peru_data()
+except FileNotFoundError as e:
+    st.error(str(e))
+    st.stop()
+
+regions = list(meta_df["region"].astype(str))
+if not regions:
+    st.error("No regions found in Peru metadata.")
+    st.stop()
+
+if "selected_region" not in st.session_state or st.session_state["selected_region"] not in regions:
+    st.session_state["selected_region"] = "Lima" if "Lima" in regions else regions[0]
+
+selected_models = []
+if use_ets:
+    selected_models.append("ETS")
+if use_arima:
+    selected_models.append("ARIMA")
+if use_prophet:
+    selected_models.append("Prophet")
+if use_xgb:
+    selected_models.append("XGBoost")
 
 tab_forecast, tab_runs = st.tabs(["Forecast", "Runs"])
 
@@ -160,232 +366,166 @@ with tab_forecast:
 
     with left:
         st.markdown('<div class="panel">', unsafe_allow_html=True)
-        st.subheader("Data source")
-        data_source = st.radio(
-            "Choose input",
-            ["Upload CSV", "Built-in sample (5y)", "Built-in sample (3y)"],
-            label_visibility="collapsed",
-        )
-        st.caption("Upload your own CSV or use the built-in weekly sample dataset.")
+        st.subheader("Peru map and regional data")
+        st.caption("Click a point on the map to select a region.")
+        map_event = plot_peru_map(meta_df, st.session_state["selected_region"], key="peru_map_forecast")
+        clicked_region = extract_clicked_region(meta_df, map_event)
+        if clicked_region and clicked_region in regions and clicked_region != st.session_state["selected_region"]:
+            st.session_state["selected_region"] = clicked_region
+            st.rerun()
+
+        selected_region = st.selectbox("Selected region", regions, index=regions.index(st.session_state["selected_region"]))
+        st.session_state["selected_region"] = selected_region
         st.markdown("</div>", unsafe_allow_html=True)
 
-        if data_source == "Upload CSV":
-            st.markdown('<div class="panel">', unsafe_allow_html=True)
-            st.subheader("Upload weekly sales data")
-            upload = st.file_uploader("CSV upload", type=["csv"], label_visibility="collapsed")
-            st.markdown("</div>", unsafe_allow_html=True)
-            if upload is None:
-                st.stop()
-
-            dataset_bytes = upload.getvalue()
-            size_mb = len(dataset_bytes) / (1024 * 1024)
-            if size_mb > SETTINGS.max_upload_mb:
-                st.error(f"File too large ({size_mb:.1f}MB). Max is {SETTINGS.max_upload_mb}MB.")
-                st.stop()
-
-            dataset_filename = upload.name
-            df_raw = pd.read_csv(upload)
-            series_label = "uploaded"
-        else:
-            sample_path = Path("sample_data/sample_weekly_sales_5y.csv")
-            if not sample_path.exists():
-                st.error("Built-in sample file is missing at sample_data/sample_weekly_sales_5y.csv.")
-                st.stop()
-            df_raw = pd.read_csv(sample_path)
-            if data_source == "Built-in sample (3y)":
-                df_raw = df_raw.tail(156).reset_index(drop=True)
-                dataset_filename = "sample_weekly_sales_3y.csv"
-                series_label = "sample (3y)"
-            else:
-                dataset_filename = "sample_weekly_sales_5y.csv"
-                series_label = "sample (5y)"
-            dataset_bytes = df_raw.to_csv(index=False).encode("utf-8")
-
-        cols = list(df_raw.columns)
-        if len(cols) < 2:
-            st.error("CSV must contain at least two columns (date + sales).")
-            st.stop()
-
-        date_default = cols.index("week_start") if "week_start" in cols else 0
-        value_default = cols.index("sales") if "sales" in cols else min(1, len(cols) - 1)
-        if value_default == date_default and len(cols) > 1:
-            value_default = 1 if date_default == 0 else 0
-
+        region_hist = region_series(sales_df, selected_region)
         st.markdown('<div class="panel">', unsafe_allow_html=True)
-        st.subheader("Map columns")
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            date_col = st.selectbox("Date column", cols, index=date_default)
-        with cc2:
-            value_col = st.selectbox("Sales column", cols, index=value_default)
-        st.caption("If data isn't perfectly weekly, we resample to W-MON by summing.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        try:
-            df_norm = validate_and_normalize(df_raw, date_col, value_col)
-            df_norm = simple_fill_missing(df_norm)
-            df_norm = enforce_weekly(df_norm)
-        except Exception as e:
-            st.error(f"Could not parse dataset: {e}")
-            st.stop()
-
-        suggested = suggest_season_length(df_norm)
-        effective_season = suggested["best"] if auto_season else int(season_length)
-        effective_season_lag = suggested["best"] if auto_season else int(season_lag)
-        if auto_season:
-            st.info(f"Auto-suggested seasonality: **{effective_season}**. Scores: {suggested['scores']}")
-
-        st.markdown('<div class="panel">', unsafe_allow_html=True)
-        st.subheader(f"Weekly sales ({series_label})")
-        plot_ts(df_norm, title=f"Weekly sales ({series_label})", key=f"chart_{series_label.replace(' ', '_')}")
+        st.subheader(f"Weekly sales history ({selected_region})")
+        plot_ts(region_hist, title=f"Weekly sales history ({selected_region})", key=f"chart_hist_{selected_region}")
         with st.expander("Show last 30 rows"):
-            st.dataframe(df_norm.tail(30), use_container_width=True)
+            st.dataframe(region_hist.tail(30), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
         st.markdown('<div class="panel">', unsafe_allow_html=True)
-        st.subheader("Run forecast")
+        st.subheader("Run forecast for all Peru regions")
+
         ok, used, limit_ = can_run(conn, user_id)
         if not ok:
             st.error("Monthly run limit reached.")
             st.stop()
 
-        selected = []
-        if use_ets: selected.append("ETS")
-        if use_arima: selected.append("ARIMA")
-        if use_prophet: selected.append("Prophet")
-        if use_xgb: selected.append("XGBoost")
-
-        if not selected:
-            st.warning("Select at least one model.")
+        if not selected_models:
+            st.warning("Select at least one model in the sidebar.")
             st.stop()
 
-        st.write("Models: " + ", ".join(selected))
+        st.write("Models: " + ", ".join(selected_models))
+        st.write(f"Regions: **{len(regions)}**")
         st.write(f"Horizon: **T+{int(forecast_horizon)}** weeks")
-        st.write(f"Holdout: **{int(eval_horizon)}** weeks")
+        st.write("Forecast charts display only the last 6 months of historical data.")
 
         run_btn = st.button("Run Forecast", type="primary", use_container_width=True)
-        st.caption("Fixed, sensible hyperparameters (no tuning).")
         st.markdown("</div>", unsafe_allow_html=True)
 
         if run_btn:
             t0 = time.time()
-            st.toast("Forecast started…", icon="⏳")
+            st.toast("Country-wide forecast started…", icon="⏳")
 
-            with st.status("Running forecast pipeline…", expanded=True) as status:
+            with st.status("Running forecasts across all regions…", expanded=True) as status:
                 progress = st.progress(0)
-                status.write("Saving dataset snapshot + consuming quota…")
                 consume_run(conn, user_id)
 
                 params = {
-                    "data_source": data_source,
+                    "data_source": "peru_3y_regions",
                     "forecast_horizon": int(forecast_horizon),
                     "eval_horizon": int(eval_horizon),
-                    "season_length_weeks": int(effective_season),
-                    "xgb_season_lag": int(effective_season_lag),
-                    "models": selected,
-                    "mapping": {"date_col": date_col, "value_col": value_col},
+                    "season_length_weeks": int(season_length),
+                    "xgb_season_lag": int(season_lag),
+                    "auto_season": auto_season,
+                    "models": selected_models,
+                    "regions": regions,
                 }
 
+                dataset_bytes = sales_df.to_csv(index=False).encode("utf-8")
                 pre_job_id = str(uuid.uuid4())
-                dataset_path = save_upload(dataset_bytes, dataset_filename, pre_job_id)
+                dataset_path = save_upload(dataset_bytes, "peru_weekly_sales_3y_by_region.csv", pre_job_id)
                 job_id = create_job(user_id, str(dataset_path), params)
                 jp = job_dir(job_id)
                 write_json(jp / "params.json", params)
-                save_csv(jp / "data_normalized.csv", df_norm)
-                progress.progress(10)
 
-                eh = int(eval_horizon)
-                if len(df_norm) <= eh + 10:
-                    eh = max(8, min(26, max(8, len(df_norm)//5)))
-                    status.write(f"Adjusted holdout window to {eh}.")
+                all_norm_parts: list[pd.DataFrame] = []
+                all_fc_parts: list[pd.DataFrame] = []
+                metrics_by_region: dict[str, dict] = {}
+                best_model_by_region: dict[str, str] = {}
 
-                metrics_by_model = {}
-                backtests = {}
+                total = len(regions)
+                for idx, region in enumerate(regions, start=1):
+                    status.write(f"• {region} ({idx}/{total})")
+                    df_norm = region_series(sales_df, region)
 
-                def run_model(name: str, fn):
-                    bt, met = holdout_backtest(df_norm, eh, lambda tr, h, f: fn(tr, h, f))
-                    backtests[name] = bt
-                    metrics_by_model[name] = met
+                    suggested = suggest_season_length(df_norm)
+                    effective_season = suggested["best"] if auto_season else int(season_length)
+                    effective_season_lag = suggested["best"] if auto_season else int(season_lag)
 
-                step = 10
-                inc = int(70 / max(1, len(selected)))
+                    metrics, fc, best = run_models_for_region(
+                        df_norm,
+                        selected_models,
+                        int(eval_horizon),
+                        int(forecast_horizon),
+                        int(effective_season),
+                        int(effective_season_lag),
+                    )
 
-                if "ETS" in selected:
-                    status.write("• ETS…")
-                    run_model("ETS", lambda tr, h, f: ets_fit_predict(tr, h, f, int(effective_season)))
-                    step += inc; progress.progress(min(step, 80))
+                    df_norm = df_norm.copy()
+                    df_norm["region"] = region
+                    all_norm_parts.append(df_norm)
 
-                if "ARIMA" in selected:
-                    status.write("• ARIMA…")
-                    run_model("ARIMA", lambda tr, h, f: arima_fit_predict(tr, h, f, order=(1,1,1)))
-                    step += inc; progress.progress(min(step, 80))
+                    fc = fc.copy()
+                    fc["region"] = region
+                    fc["best_model"] = best
+                    all_fc_parts.append(fc)
 
-                if "Prophet" in selected:
-                    status.write("• Prophet…")
-                    run_model("Prophet", lambda tr, h, f: prophet_fit_predict(tr, h, f, season_length_weeks=int(effective_season)))
-                    step += inc; progress.progress(min(step, 80))
+                    metrics_by_region[region] = metrics
+                    best_model_by_region[region] = best
+                    progress.progress(int(100 * idx / total))
 
-                if "XGBoost" in selected:
-                    status.write("• XGBoost…")
-                    run_model("XGBoost", lambda tr, h, f: xgb_fit_predict(tr, h, f, season_lag=int(effective_season_lag)))
-                    step += inc; progress.progress(min(step, 80))
+                all_norm = pd.concat(all_norm_parts, ignore_index=True)
+                all_fc = pd.concat(all_fc_parts, ignore_index=True)
 
-                status.write("Selecting best model + forecasting…")
-                best = choose_best(metrics_by_model)
-                freq = pd.infer_freq(df_norm["ds"]) or "W-MON"
-                fh = int(forecast_horizon)
-
-                if best == "ETS":
-                    fc = ets_fit_predict(df_norm, fh, freq, int(effective_season))
-                elif best == "ARIMA":
-                    fc = arima_fit_predict(df_norm, fh, freq, order=(1,1,1))
-                elif best == "Prophet":
-                    fc = prophet_fit_predict(df_norm, fh, freq, season_length_weeks=int(effective_season))
-                else:
-                    fc = xgb_fit_predict(df_norm, fh, freq, season_lag=int(effective_season_lag))
-
-                write_json(jp / "metrics.json", metrics_by_model)
-                save_csv(jp / "forecast.csv", fc)
-                save_csv(jp / f"backtest_{best}.csv", backtests[best])
+                save_csv(jp / "data_normalized.csv", all_norm)
+                save_csv(jp / "forecast.csv", all_fc)
+                write_json(jp / "metrics.json", metrics_by_region)
+                write_json(jp / "best_models.json", best_model_by_region)
 
                 artifacts = {
                     "data_normalized_csv": str(jp / "data_normalized.csv"),
                     "metrics_json": str(jp / "metrics.json"),
                     "forecast_csv": str(jp / "forecast.csv"),
-                    "best_backtest_csv": str(jp / f"backtest_{best}.csv"),
+                    "best_models_json": str(jp / "best_models.json"),
                 }
 
+                dominant_model = pd.Series(best_model_by_region).value_counts().idxmax()
                 update_job(
                     job_id,
                     status="SUCCEEDED",
-                    best_model=best,
-                    metrics_json=json.dumps(metrics_by_model),
+                    best_model=dominant_model,
+                    metrics_json=json.dumps(metrics_by_region),
                     artifacts_json=json.dumps(artifacts),
                     finished_at=dt.datetime.now().isoformat(),
                     error_message=None,
                 )
 
-                progress.progress(100)
-                status.update(label=f"Done in {time.time()-t0:.1f}s — Best model: {best}", state="complete")
-                st.toast(f"Forecast complete (best: {best})", icon="✅")
+                status.update(label=f"Done in {time.time() - t0:.1f}s — Forecasts built for {len(regions)} regions", state="complete")
+                st.toast("Country-wide forecast complete", icon="✅")
 
-            best_metrics = metrics_by_model[best]
+            chosen_region = st.session_state["selected_region"]
+            hist = all_norm[all_norm["region"] == chosen_region][["ds", "y"]].sort_values("ds")
+            fc = all_fc[all_fc["region"] == chosen_region][["ds", "yhat", "best_model"]].sort_values("ds")
+            hist_trim = trim_history_for_forecast(hist, fc[["ds", "yhat"]], history_weeks=26)
+            region_metrics = metrics_by_region[chosen_region]
+            region_best = best_model_by_region[chosen_region]
+
             st.markdown('<div class="panel">', unsafe_allow_html=True)
-            st.subheader("Results")
-            met_df = pd.DataFrame(metrics_by_model).T.reset_index().rename(columns={"index":"Model"})
-            st.dataframe(met_df, use_container_width=True, hide_index=True)
-
+            st.subheader(f"Results ({chosen_region})")
+            st.dataframe(
+                pd.DataFrame(region_metrics).T.reset_index().rename(columns={"index": "Model"}),
+                use_container_width=True,
+                hide_index=True,
+            )
             m1, m2, m3 = st.columns(3)
-            m1.metric("Best model", best)
-            m2.metric("MAPE", f"{best_metrics['MAPE']:.2f}%")
-            m3.metric("RMSE", f"{best_metrics['RMSE']:.2f}")
-
-            plot_ts(df_norm, fc=fc, title=f"Best model forecast • {best} • MAPE {best_metrics['MAPE']:.2f}%", key=f"chart_result_{job_id}")
+            m1.metric("Best model", region_best)
+            m2.metric("MAPE", f"{region_metrics[region_best]['MAPE']:.2f}%")
+            m3.metric("RMSE", f"{region_metrics[region_best]['RMSE']:.2f}")
+            plot_ts(
+                hist_trim,
+                fc=fc[["ds", "yhat"]],
+                title=f"{chosen_region}: last 6 months history + forecast",
+                key=f"chart_result_{job_id}_{chosen_region}",
+            )
             st.download_button(
-                "Download forecast.csv",
+                "Download country forecast.csv",
                 data=Path(artifacts["forecast_csv"]).read_bytes(),
-                file_name=f"forecast_{job_id}.csv",
+                file_name=f"forecast_peru_regions_{job_id}.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -406,7 +546,7 @@ with tab_runs:
     row = load_job(job_id)
 
     job_id, created_at, status, dataset_path, params_json, best_model, metrics_json, artifacts_json, error_message = row
-    st.write(f"**Status:** {status}  |  **Created:** {created_at}  |  **Best model:** {best_model or '-'}")
+    st.write(f"**Status:** {status}  |  **Created:** {created_at}  |  **Dominant model:** {best_model or '-'}")
     if error_message:
         st.error(error_message)
 
@@ -417,15 +557,63 @@ with tab_runs:
     artifacts = json.loads(artifacts_json)
     metrics = json.loads(metrics_json)
 
-    st.subheader("Model metrics")
-    st.dataframe(pd.DataFrame(metrics).T.reset_index().rename(columns={"index":"Model"}), use_container_width=True, hide_index=True)
+    df_norm_all = pd.read_csv(artifacts["data_normalized_csv"])
+    df_norm_all["ds"] = pd.to_datetime(df_norm_all["ds"])
+    fc_all = pd.read_csv(artifacts["forecast_csv"])
+    fc_all["ds"] = pd.to_datetime(fc_all["ds"])
 
-    df_norm = pd.read_csv(artifacts["data_normalized_csv"])
-    df_norm["ds"] = pd.to_datetime(df_norm["ds"])
-    fc = pd.read_csv(artifacts["forecast_csv"])
-    fc["ds"] = pd.to_datetime(fc["ds"])
+    is_regional = "region" in df_norm_all.columns and "region" in fc_all.columns
+    if not is_regional:
+        st.info("This run predates regional Peru forecasts.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.stop()
 
-    bm = best_model
-    bm_mape = metrics[bm]["MAPE"]
-    plot_ts(df_norm, fc=fc, title=f"Best model forecast • {bm} • MAPE {bm_mape:.2f}%", key=f"chart_history_{job_id}")
+    hist_regions = sorted(df_norm_all["region"].dropna().astype(str).unique())
+    run_region_key = f"run_region_{job_id}"
+    if run_region_key not in st.session_state or st.session_state[run_region_key] not in hist_regions:
+        st.session_state[run_region_key] = "Lima" if "Lima" in hist_regions else hist_regions[0]
+
+    st.caption("Select a region from the map to view that region's history and forecast.")
+    map_event = plot_peru_map(
+        meta_df[meta_df["region"].isin(hist_regions)],
+        st.session_state[run_region_key],
+        key=f"peru_map_run_{job_id}",
+    )
+    clicked_region = extract_clicked_region(meta_df, map_event)
+    if clicked_region and clicked_region in hist_regions and clicked_region != st.session_state[run_region_key]:
+        st.session_state[run_region_key] = clicked_region
+        st.rerun()
+
+    chosen = st.selectbox(
+        "Region",
+        hist_regions,
+        index=hist_regions.index(st.session_state[run_region_key]),
+        key=f"run_region_select_{job_id}",
+    )
+    st.session_state[run_region_key] = chosen
+
+    region_metrics = metrics.get(chosen, {})
+    if region_metrics:
+        st.subheader(f"Model metrics ({chosen})")
+        st.dataframe(
+            pd.DataFrame(region_metrics).T.reset_index().rename(columns={"index": "Model"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    hist = df_norm_all[df_norm_all["region"] == chosen][["ds", "y"]].sort_values("ds")
+    fc = fc_all[fc_all["region"] == chosen].copy().sort_values("ds")
+    fc_view = fc[["ds", "yhat"]]
+    hist_trim = trim_history_for_forecast(hist, fc_view, history_weeks=26)
+
+    best_for_region = "-"
+    if "best_model" in fc.columns and not fc.empty:
+        best_for_region = str(fc["best_model"].iloc[0])
+
+    plot_ts(
+        hist_trim,
+        fc=fc_view,
+        title=f"{chosen}: last 6 months history + forecast • best={best_for_region}",
+        key=f"chart_history_{job_id}_{chosen}",
+    )
     st.markdown("</div>", unsafe_allow_html=True)

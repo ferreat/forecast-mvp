@@ -7,11 +7,11 @@
 - XGBoost (lag features; seasonal lag defaults to 52, but can be auto-suggested/overridden)
 
 ## Key behaviors
-- Weekly sample data included (up to ~5 years).
-- In-app data source selector: upload CSV, built-in 5y sample, or built-in 3y sample (weekly).
-- Default forecast horizon is **T+6** weeks (configurable).
-- Seasonality defaults to **52** but can be challenged via autocorrelation suggestion.
-- UI shows per-model MAE/RMSE/MAPE, picks best model, and plots historic + best forecast with metric in title.
+- Built-in Peru dataset only: 3 years of weekly sales for all 25 Peruvian regions.
+- Interactive Peru map in dashboard: click a region (for example, Lima) to inspect its series.
+- When you run forecast, models are evaluated and forecasted for all regions.
+- Region view updates dynamically: selecting another region shows that region's history + forecast.
+- Forecast charts show only the previous 6 months of history plus the future horizon.
 
 ## Install & run (Conda recommended)
 ```bash
@@ -32,12 +32,12 @@ streamlit run app.py
 > If Prophet fails with pip, use Conda.
 
 ## Sample dataset
-Built-in sample (5y) and built-in sample (3y) are selectable directly in the app.
-
-If you want to upload manually, use: `sample_data/sample_weekly_sales_5y.csv`
-Map:
-- Date column: `week_start`
-- Target column: `sales`
+- Sales data: `sample_data/peru_weekly_sales_3y_by_region.csv`
+- Region map points: `sample_data/peru_regions_meta.csv`
+- Fields:
+  - `region`
+  - `week_start`
+  - `sales`
 
 
 ### Fixes
