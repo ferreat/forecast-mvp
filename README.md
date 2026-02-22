@@ -34,6 +34,7 @@ streamlit run app.py
 ## Sample dataset
 - Sales data: `sample_data/peru_weekly_sales_3y_by_region.csv`
 - Region map points: `sample_data/peru_regions_meta.csv`
+- Region map boundaries (approximate): `sample_data/peru_regions_boundaries.geojson`
 - Fields:
   - `region`
   - `week_start`
