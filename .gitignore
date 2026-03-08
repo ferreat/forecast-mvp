@@ -8,7 +8,9 @@ __pycache__/
 .streamlit/
 
 # Local data & DB
-data/
+data/*
+!data/maps/
+!data/maps/*.geojson
 sample_data/
 *.db
 

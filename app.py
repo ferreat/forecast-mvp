@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -11,21 +13,104 @@ from src.forecasting import ForecastingEngine
 
 st.set_page_config(page_title="Forecasting MVP", page_icon="📈", layout="wide")
 
-DATA_PATH = Path(__file__).parent / "data" / "sample_weekly_demand.csv"
+DATA_DIR = Path(__file__).parent / "data"
+COUNTRIES = ["UK", "USA", "France", "Peru"]
+
+COUNTRY_SERIES_CONFIG = {
+    "UK": {"seed": 7, "scale": 0.95, "offset": 8.0, "wave": 6.0, "phase": 0.8},
+    "USA": {"seed": 11, "scale": 1.25, "offset": 20.0, "wave": 9.0, "phase": 0.3},
+    "France": {"seed": 19, "scale": 1.05, "offset": 12.0, "wave": 7.5, "phase": 1.6},
+    "Peru": {"seed": 29, "scale": 0.9, "offset": 6.0, "wave": 8.5, "phase": 2.1},
+}
+
+COUNTRY_MAP_CONFIG = {
+    "UK": {"geojson_path": DATA_DIR / "maps" / "uk_adm1.geojson", "center": {"lat": 55.2, "lon": -3.4}, "zoom": 3.8},
+    "USA": {"geojson_path": DATA_DIR / "maps" / "usa_adm1.geojson", "center": {"lat": 39.6, "lon": -98.6}, "zoom": 2.2},
+    "France": {"geojson_path": DATA_DIR / "maps" / "france_adm1.geojson", "center": {"lat": 46.5, "lon": 2.4}, "zoom": 4.1},
+    "Peru": {"geojson_path": DATA_DIR / "maps" / "peru_adm1.geojson", "center": {"lat": -9.2, "lon": -74.4}, "zoom": 4.0},
+}
 
 
-def ensure_sample_dataset() -> None:
-    if DATA_PATH.exists():
+def sample_data_path(country: str) -> Path:
+    slug = country.lower().replace(" ", "_")
+    return DATA_DIR / f"sample_weekly_demand_{slug}.csv"
+
+
+def ensure_sample_dataset(country: str) -> None:
+    path = sample_data_path(country)
+    if path.exists():
         return
-    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    sample_df = generate_synthetic_weekly_data()
-    sample_df.to_csv(DATA_PATH, index=False)
+
+    cfg = COUNTRY_SERIES_CONFIG[country]
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    sample_df = generate_synthetic_weekly_data(seed=cfg["seed"])
+
+    idx = np.arange(len(sample_df))
+    season_shift = cfg["wave"] * np.sin((2 * np.pi * idx / 26) + cfg["phase"])
+    sample_df["demand"] = (sample_df["demand"] * cfg["scale"] + cfg["offset"] + season_shift).clip(lower=20).round(2)
+    sample_df.to_csv(path, index=False)
+
+
+def load_sample_dataset(country: str) -> pd.DataFrame:
+    ensure_sample_dataset(country)
+    df = pd.read_csv(sample_data_path(country))
+    df["date"] = pd.to_datetime(df["date"])
+    return df
 
 
 def plot_history(df: pd.DataFrame, title: str):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df["date"], y=df["demand"], mode="lines+markers", name="Demand"))
     fig.update_layout(height=360, title=title, xaxis_title="Week", yaxis_title="Demand")
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def load_geojson(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def plot_country_map(country: str) -> go.Figure:
+    config = COUNTRY_MAP_CONFIG[country]
+    geojson = load_geojson(str(config["geojson_path"]))
+    features = geojson.get("features", [])
+    if not features:
+        raise ValueError("No region boundaries found for selected country.")
+
+    id_field = "GID_1"
+    label_field = "NAME_1"
+    for feature in features:
+        props = feature.get("properties", {})
+        if id_field not in props or label_field not in props:
+            raise ValueError(f"GeoJSON for {country} is missing required region properties.")
+
+    locations = [feature["properties"][id_field] for feature in features]
+    labels = [feature["properties"][label_field] for feature in features]
+    values = [(i % 9) + 1 for i, _ in enumerate(locations)]
+
+    fig = go.Figure(
+        go.Choroplethmapbox(
+            geojson=geojson,
+            locations=locations,
+            z=values,
+            text=labels,
+            featureidkey=f"properties.{id_field}",
+            hovertemplate="%{text}<extra></extra>",
+            marker_line_width=0.8,
+            marker_line_color="#ffffff",
+            colorscale="Viridis",
+            showscale=False,
+        )
+    )
+    fig.update_layout(
+        height=420,
+        margin=dict(l=0, r=0, t=36, b=6),
+        title=f"{country} states / regions",
+        mapbox_style="carto-positron",
+        mapbox_zoom=config["zoom"],
+        mapbox_center=config["center"],
+    )
     return fig
 
 
@@ -56,34 +141,41 @@ with st.sidebar:
     st.markdown("---")
     st.write(f"Logged in as: **{st.session_state.email}**")
 
-left, mid, right = st.columns([1.2, 2.2, 1.4])
+top_left, top_right = st.columns([1.2, 2.4])
 
-with mid:
-    st.subheader("Dataset")
-    source = st.radio("Choose a source", ["Sample synthetic dataset", "Upload my own dataset"], horizontal=True)
-    uploaded_file = None
-    if source == "Upload my own dataset":
-        uploaded_file = st.file_uploader("Upload CSV or Excel with 'date' and 'demand' columns", type=["csv", "xlsx", "xls"])
+with top_left:
+    st.subheader("Data overview")
+
+with top_right:
+    st.subheader("Region map")
+    selected_country = st.selectbox("Country", COUNTRIES, index=COUNTRIES.index("USA"))
+    st.plotly_chart(plot_country_map(selected_country), use_container_width=True)
+    st.caption("Region click-to-drilldown will be added in a future iteration.")
+
+st.subheader("Dataset")
+source = st.radio("Choose a source", ["Sample synthetic dataset", "Upload my own dataset"], horizontal=True)
+uploaded_file = None
+if source == "Upload my own dataset":
+    uploaded_file = st.file_uploader("Upload CSV or Excel with 'date' and 'demand' columns", type=["csv", "xlsx", "xls"])
 
 try:
     if source == "Sample synthetic dataset":
-        ensure_sample_dataset()
-        df = pd.read_csv(DATA_PATH)
-        df["date"] = pd.to_datetime(df["date"])
+        st.caption(f"Active country dataset: **{selected_country}**")
+        df = load_sample_dataset(selected_country)
     else:
         if uploaded_file is None:
             st.info("Upload a file to continue.")
             st.stop()
         df = load_uploaded_file(uploaded_file)
 
-    with left:
-        st.subheader("Data overview")
+    with top_left:
         st.metric("Rows", len(df))
         st.metric("Start", df["date"].min().date().isoformat())
         st.metric("End", df["date"].max().date().isoformat())
         st.metric("Average demand", f"{df['demand'].mean():.1f}")
 
-    st.plotly_chart(plot_history(df, "Weekly demand history"), use_container_width=True)
+    history_title = f"Weekly demand history - {selected_country}" if source == "Sample synthetic dataset" else "Weekly demand history"
+    st.plotly_chart(plot_history(df, history_title), use_container_width=True)
 
     preview = st.expander("Preview data", expanded=False)
     preview.dataframe(df.tail(12), use_container_width=True)
@@ -124,18 +216,21 @@ try:
                 name=f"{best_model} forecast",
             )
         )
+        forecast_scope = selected_country if source == "Sample synthetic dataset" else "Uploaded dataset"
         fig.update_layout(
             height=420,
-            title=f"Last 12 weeks actuals and {horizon}-week forecast ({best_model})",
+            title=f"Last 12 weeks actuals and {horizon}-week forecast ({best_model}) - {forecast_scope}",
             xaxis_title="Week",
             yaxis_title="Demand",
         )
         st.subheader("Best model forecast")
         st.plotly_chart(fig, use_container_width=True)
 
-        with right:
+        details_col, _ = st.columns([1.3, 2.7])
+        with details_col:
             st.subheader("Best model details")
             st.json({
+                "scope": forecast_scope,
                 "model": best_model,
                 "cv_rmse": round(float(best_row["CV RMSE"]), 3),
                 "test_metrics": {
