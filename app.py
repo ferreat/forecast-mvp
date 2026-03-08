@@ -90,9 +90,17 @@ try:
 
     if st.button("Get forecasts", type="primary", use_container_width=True):
         train_df, test_df = train_test_split_weekly(df, horizon=horizon)
-        with st.spinner("Running forecasting pipeline..."):
-            engine = ForecastingEngine(horizon=horizon, cv_splits=cv_splits)
-            summary_df, results = engine.run(train_df, test_df)
+        progress_text = st.empty()
+        progress_bar = st.progress(0, text="Preparing forecasting pipeline...")
+
+        def update_progress(progress: float, message: str) -> None:
+            progress_bar.progress(int(progress * 100), text=message)
+            progress_text.caption(message)
+
+        engine = ForecastingEngine(horizon=horizon, cv_splits=cv_splits)
+        summary_df, results = engine.run(train_df, test_df, progress_callback=update_progress)
+        progress_bar.progress(100, text="Forecasting completed.")
+        progress_text.caption("Forecasting completed.")
 
         st.subheader("Model performance")
         st.dataframe(
