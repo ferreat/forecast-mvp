@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from urllib.request import urlopen
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -11,21 +14,117 @@ from src.forecasting import ForecastingEngine
 
 st.set_page_config(page_title="Forecasting MVP", page_icon="📈", layout="wide")
 
-DATA_PATH = Path(__file__).parent / "data" / "sample_weekly_demand.csv"
+DATA_DIR = Path(__file__).parent / "data"
+COUNTRIES = ["UK", "USA", "France", "Peru"]
+
+COUNTRY_SERIES_CONFIG = {
+    "UK": {"seed": 7, "scale": 0.95, "offset": 8.0, "wave": 6.0, "phase": 0.8},
+    "USA": {"seed": 11, "scale": 1.25, "offset": 20.0, "wave": 9.0, "phase": 0.3},
+    "France": {"seed": 19, "scale": 1.05, "offset": 12.0, "wave": 7.5, "phase": 1.6},
+    "Peru": {"seed": 29, "scale": 0.9, "offset": 6.0, "wave": 8.5, "phase": 2.1},
+}
+
+COUNTRY_MAP_CONFIG = {
+    "UK": {
+        "geojson_url": "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/releaseData/gbOpen/GBR/ADM1/geoBoundaries-GBR-ADM1.geojson",
+    },
+    "USA": {
+        "geojson_url": "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/releaseData/gbOpen/USA/ADM1/geoBoundaries-USA-ADM1.geojson",
+    },
+    "France": {
+        "geojson_url": "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/releaseData/gbOpen/FRA/ADM1/geoBoundaries-FRA-ADM1.geojson",
+    },
+    "Peru": {
+        "geojson_url": "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/releaseData/gbOpen/PER/ADM1/geoBoundaries-PER-ADM1.geojson",
+    },
+}
 
 
-def ensure_sample_dataset() -> None:
-    if DATA_PATH.exists():
+def sample_data_path(country: str) -> Path:
+    slug = country.lower().replace(" ", "_")
+    return DATA_DIR / f"sample_weekly_demand_{slug}.csv"
+
+
+def ensure_sample_dataset(country: str) -> None:
+    path = sample_data_path(country)
+    if path.exists():
         return
-    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    sample_df = generate_synthetic_weekly_data()
-    sample_df.to_csv(DATA_PATH, index=False)
+
+    cfg = COUNTRY_SERIES_CONFIG[country]
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    sample_df = generate_synthetic_weekly_data(seed=cfg["seed"])
+
+    idx = np.arange(len(sample_df))
+    season_shift = cfg["wave"] * np.sin((2 * np.pi * idx / 26) + cfg["phase"])
+    sample_df["demand"] = (sample_df["demand"] * cfg["scale"] + cfg["offset"] + season_shift).clip(lower=20).round(2)
+    sample_df.to_csv(path, index=False)
+
+
+def load_sample_dataset(country: str) -> pd.DataFrame:
+    ensure_sample_dataset(country)
+    df = pd.read_csv(sample_data_path(country))
+    df["date"] = pd.to_datetime(df["date"])
+    return df
 
 
 def plot_history(df: pd.DataFrame, title: str):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df["date"], y=df["demand"], mode="lines+markers", name="Demand"))
     fig.update_layout(height=360, title=title, xaxis_title="Week", yaxis_title="Demand")
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def load_geojson(url: str) -> dict:
+    with urlopen(url, timeout=20) as response:
+        return json.load(response)
+
+
+def extract_geo_ids(geojson: dict):
+    features = geojson.get("features", [])
+    if not features:
+        raise ValueError("No regional boundaries found for selected country.")
+
+    property_candidates = ["shapeName", "name", "NAME_1", "NAME"]
+    for key in property_candidates:
+        if all(key in feature.get("properties", {}) for feature in features):
+            locations = [feature["properties"][key] for feature in features]
+            return f"properties.{key}", locations
+
+    if all(feature.get("id") is not None for feature in features):
+        locations = [feature["id"] for feature in features]
+        return "id", locations
+
+    for i, feature in enumerate(features):
+        feature["id"] = f"region-{i + 1}"
+    locations = [feature["id"] for feature in features]
+    return "id", locations
+
+
+def plot_country_map(country: str) -> go.Figure:
+    geojson_url = COUNTRY_MAP_CONFIG[country]["geojson_url"]
+    geojson = load_geojson(geojson_url)
+    featureidkey, locations = extract_geo_ids(geojson)
+
+    values = [(i % 7) + 1 for i, _ in enumerate(locations)]
+    labels = [str(location) for location in locations]
+
+    fig = go.Figure(
+        go.Choropleth(
+            geojson=geojson,
+            locations=locations,
+            z=values,
+            text=labels,
+            featureidkey=featureidkey,
+            hovertemplate="%{text}<extra></extra>",
+            marker_line_width=0.6,
+            marker_line_color="#f7f7f7",
+            colorscale="Tealgrn",
+            showscale=False,
+        )
+    )
+    fig.update_geos(fitbounds="locations", visible=False, showcountries=False)
+    fig.update_layout(height=260, margin=dict(l=0, r=0, t=36, b=0), title=f"{country} regional map")
     return fig
 
 
@@ -58,6 +157,14 @@ with st.sidebar:
 
 left, mid, right = st.columns([1.2, 2.2, 1.4])
 
+with right:
+    st.subheader("Region map")
+    selected_country = st.selectbox("Country", COUNTRIES, index=COUNTRIES.index("USA"))
+    try:
+        st.plotly_chart(plot_country_map(selected_country), use_container_width=True)
+    except Exception:
+        st.info("Regional map is temporarily unavailable for the selected country.")
+
 with mid:
     st.subheader("Dataset")
     source = st.radio("Choose a source", ["Sample synthetic dataset", "Upload my own dataset"], horizontal=True)
@@ -67,9 +174,8 @@ with mid:
 
 try:
     if source == "Sample synthetic dataset":
-        ensure_sample_dataset()
-        df = pd.read_csv(DATA_PATH)
-        df["date"] = pd.to_datetime(df["date"])
+        st.caption(f"Active country dataset: **{selected_country}**")
+        df = load_sample_dataset(selected_country)
     else:
         if uploaded_file is None:
             st.info("Upload a file to continue.")
@@ -83,7 +189,8 @@ try:
         st.metric("End", df["date"].max().date().isoformat())
         st.metric("Average demand", f"{df['demand'].mean():.1f}")
 
-    st.plotly_chart(plot_history(df, "Weekly demand history"), use_container_width=True)
+    history_title = f"Weekly demand history - {selected_country}" if source == "Sample synthetic dataset" else "Weekly demand history"
+    st.plotly_chart(plot_history(df, history_title), use_container_width=True)
 
     preview = st.expander("Preview data", expanded=False)
     preview.dataframe(df.tail(12), use_container_width=True)
@@ -124,9 +231,10 @@ try:
                 name=f"{best_model} forecast",
             )
         )
+        forecast_scope = selected_country if source == "Sample synthetic dataset" else "Uploaded dataset"
         fig.update_layout(
             height=420,
-            title=f"Last 12 weeks actuals and {horizon}-week forecast ({best_model})",
+            title=f"Last 12 weeks actuals and {horizon}-week forecast ({best_model}) - {forecast_scope}",
             xaxis_title="Week",
             yaxis_title="Demand",
         )
@@ -136,6 +244,7 @@ try:
         with right:
             st.subheader("Best model details")
             st.json({
+                "scope": forecast_scope,
                 "model": best_model,
                 "cv_rmse": round(float(best_row["CV RMSE"]), 3),
                 "test_metrics": {
