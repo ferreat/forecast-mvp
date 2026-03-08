@@ -104,7 +104,7 @@ def plot_country_map(country: str) -> go.Figure:
         )
     )
     fig.update_layout(
-        height=320,
+        height=420,
         margin=dict(l=0, r=0, t=36, b=6),
         title=f"{country} states / regions",
         mapbox_style="carto-positron",
@@ -141,20 +141,22 @@ with st.sidebar:
     st.markdown("---")
     st.write(f"Logged in as: **{st.session_state.email}**")
 
-left, mid, right = st.columns([1.2, 2.2, 1.4])
+top_left, top_right = st.columns([1.2, 2.4])
 
-with right:
+with top_left:
+    st.subheader("Data overview")
+
+with top_right:
     st.subheader("Region map")
     selected_country = st.selectbox("Country", COUNTRIES, index=COUNTRIES.index("USA"))
     st.plotly_chart(plot_country_map(selected_country), use_container_width=True)
     st.caption("Region click-to-drilldown will be added in a future iteration.")
 
-with mid:
-    st.subheader("Dataset")
-    source = st.radio("Choose a source", ["Sample synthetic dataset", "Upload my own dataset"], horizontal=True)
-    uploaded_file = None
-    if source == "Upload my own dataset":
-        uploaded_file = st.file_uploader("Upload CSV or Excel with 'date' and 'demand' columns", type=["csv", "xlsx", "xls"])
+st.subheader("Dataset")
+source = st.radio("Choose a source", ["Sample synthetic dataset", "Upload my own dataset"], horizontal=True)
+uploaded_file = None
+if source == "Upload my own dataset":
+    uploaded_file = st.file_uploader("Upload CSV or Excel with 'date' and 'demand' columns", type=["csv", "xlsx", "xls"])
 
 try:
     if source == "Sample synthetic dataset":
@@ -166,8 +168,7 @@ try:
             st.stop()
         df = load_uploaded_file(uploaded_file)
 
-    with left:
-        st.subheader("Data overview")
+    with top_left:
         st.metric("Rows", len(df))
         st.metric("Start", df["date"].min().date().isoformat())
         st.metric("End", df["date"].max().date().isoformat())
@@ -225,7 +226,8 @@ try:
         st.subheader("Best model forecast")
         st.plotly_chart(fig, use_container_width=True)
 
-        with right:
+        details_col, _ = st.columns([1.3, 2.7])
+        with details_col:
             st.subheader("Best model details")
             st.json({
                 "scope": forecast_scope,
