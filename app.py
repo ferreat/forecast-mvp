@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from urllib.request import urlopen
 
 import numpy as np
 import pandas as pd
@@ -25,18 +23,10 @@ COUNTRY_SERIES_CONFIG = {
 }
 
 COUNTRY_MAP_CONFIG = {
-    "UK": {
-        "geojson_url": "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/releaseData/gbOpen/GBR/ADM1/geoBoundaries-GBR-ADM1.geojson",
-    },
-    "USA": {
-        "geojson_url": "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/releaseData/gbOpen/USA/ADM1/geoBoundaries-USA-ADM1.geojson",
-    },
-    "France": {
-        "geojson_url": "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/releaseData/gbOpen/FRA/ADM1/geoBoundaries-FRA-ADM1.geojson",
-    },
-    "Peru": {
-        "geojson_url": "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/releaseData/gbOpen/PER/ADM1/geoBoundaries-PER-ADM1.geojson",
-    },
+    "UK": {"iso3": "GBR"},
+    "USA": {"iso3": "USA"},
+    "France": {"iso3": "FRA"},
+    "Peru": {"iso3": "PER"},
 }
 
 
@@ -74,57 +64,47 @@ def plot_history(df: pd.DataFrame, title: str):
     return fig
 
 
-@st.cache_data(show_spinner=False)
-def load_geojson(url: str) -> dict:
-    with urlopen(url, timeout=20) as response:
-        return json.load(response)
-
-
-def extract_geo_ids(geojson: dict):
-    features = geojson.get("features", [])
-    if not features:
-        raise ValueError("No regional boundaries found for selected country.")
-
-    property_candidates = ["shapeName", "name", "NAME_1", "NAME"]
-    for key in property_candidates:
-        if all(key in feature.get("properties", {}) for feature in features):
-            locations = [feature["properties"][key] for feature in features]
-            return f"properties.{key}", locations
-
-    if all(feature.get("id") is not None for feature in features):
-        locations = [feature["id"] for feature in features]
-        return "id", locations
-
-    for i, feature in enumerate(features):
-        feature["id"] = f"region-{i + 1}"
-    locations = [feature["id"] for feature in features]
-    return "id", locations
-
-
 def plot_country_map(country: str) -> go.Figure:
-    geojson_url = COUNTRY_MAP_CONFIG[country]["geojson_url"]
-    geojson = load_geojson(geojson_url)
-    featureidkey, locations = extract_geo_ids(geojson)
-
-    values = [(i % 7) + 1 for i, _ in enumerate(locations)]
-    labels = [str(location) for location in locations]
+    iso3 = COUNTRY_MAP_CONFIG[country]["iso3"]
 
     fig = go.Figure(
         go.Choropleth(
-            geojson=geojson,
-            locations=locations,
-            z=values,
-            text=labels,
-            featureidkey=featureidkey,
+            locations=[iso3],
+            z=[1],
+            text=[country],
+            locationmode="ISO-3",
             hovertemplate="%{text}<extra></extra>",
-            marker_line_width=0.6,
-            marker_line_color="#f7f7f7",
+            marker_line_width=1.0,
+            marker_line_color="#ffffff",
             colorscale="Tealgrn",
             showscale=False,
         )
     )
-    fig.update_geos(fitbounds="locations", visible=False, showcountries=False)
-    fig.update_layout(height=260, margin=dict(l=0, r=0, t=36, b=0), title=f"{country} regional map")
+    fig.update_geos(
+        fitbounds="locations",
+        visible=False,
+        showcountries=True,
+        countrycolor="#5f7285",
+        showcoastlines=False,
+        showframe=False,
+        bgcolor="rgba(0,0,0,0)",
+    )
+    fig.update_layout(
+        height=260,
+        margin=dict(l=0, r=0, t=36, b=0),
+        title=f"{country} map",
+        annotations=[
+            dict(
+                x=0.5,
+                y=0.0,
+                xref="paper",
+                yref="paper",
+                text="Country overview (regional click support can be added next).",
+                showarrow=False,
+                font=dict(size=10, color="#5f7285"),
+            )
+        ],
+    )
     return fig
 
 
@@ -160,10 +140,7 @@ left, mid, right = st.columns([1.2, 2.2, 1.4])
 with right:
     st.subheader("Region map")
     selected_country = st.selectbox("Country", COUNTRIES, index=COUNTRIES.index("USA"))
-    try:
-        st.plotly_chart(plot_country_map(selected_country), use_container_width=True)
-    except Exception:
-        st.info("Regional map is temporarily unavailable for the selected country.")
+    st.plotly_chart(plot_country_map(selected_country), use_container_width=True)
 
 with mid:
     st.subheader("Dataset")
