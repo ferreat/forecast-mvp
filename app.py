@@ -14,6 +14,14 @@ st.set_page_config(page_title="Forecasting MVP", page_icon="📈", layout="wide"
 DATA_PATH = Path(__file__).parent / "data" / "sample_weekly_demand.csv"
 
 
+def ensure_sample_dataset() -> None:
+    if DATA_PATH.exists():
+        return
+    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+    sample_df = generate_synthetic_weekly_data()
+    sample_df.to_csv(DATA_PATH, index=False)
+
+
 def plot_history(df: pd.DataFrame, title: str):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df["date"], y=df["demand"], mode="lines+markers", name="Demand"))
@@ -59,6 +67,7 @@ with mid:
 
 try:
     if source == "Sample synthetic dataset":
+        ensure_sample_dataset()
         df = pd.read_csv(DATA_PATH)
         df["date"] = pd.to_datetime(df["date"])
     else:
