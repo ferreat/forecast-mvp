@@ -101,7 +101,6 @@ def plot_country_map(country: str) -> go.Figure:
             marker_line_color="#ffffff",
             colorscale="Viridis",
             showscale=False,
-            opacity=0.72,
         )
     )
     fig.update_layout(
