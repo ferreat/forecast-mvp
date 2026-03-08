@@ -1,7 +1,7 @@
 streamlit>=1.42.0
 pandas>=2.2.0
 numpy>=1.26.0
-plotly>=5.24.0
+plotly>=5.18 #5.24.0
 scikit-learn>=1.5.0
 statsmodels>=0.14.4
 prophet>=1.1.6
