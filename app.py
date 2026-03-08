@@ -24,10 +24,10 @@ COUNTRY_SERIES_CONFIG = {
 }
 
 COUNTRY_MAP_CONFIG = {
-    "UK": {"geojson_path": DATA_DIR / "maps" / "uk_adm1.geojson"},
-    "USA": {"geojson_path": DATA_DIR / "maps" / "usa_adm1.geojson"},
-    "France": {"geojson_path": DATA_DIR / "maps" / "france_adm1.geojson"},
-    "Peru": {"geojson_path": DATA_DIR / "maps" / "peru_adm1.geojson"},
+    "UK": {"geojson_path": DATA_DIR / "maps" / "uk_adm1.geojson", "center": {"lat": 55.2, "lon": -3.4}, "zoom": 3.8},
+    "USA": {"geojson_path": DATA_DIR / "maps" / "usa_adm1.geojson", "center": {"lat": 39.6, "lon": -98.6}, "zoom": 2.2},
+    "France": {"geojson_path": DATA_DIR / "maps" / "france_adm1.geojson", "center": {"lat": 46.5, "lon": 2.4}, "zoom": 4.1},
+    "Peru": {"geojson_path": DATA_DIR / "maps" / "peru_adm1.geojson", "center": {"lat": -9.2, "lon": -74.4}, "zoom": 4.0},
 }
 
 
@@ -72,7 +72,8 @@ def load_geojson(path: str) -> dict:
 
 
 def plot_country_map(country: str) -> go.Figure:
-    geojson = load_geojson(str(COUNTRY_MAP_CONFIG[country]["geojson_path"]))
+    config = COUNTRY_MAP_CONFIG[country]
+    geojson = load_geojson(str(config["geojson_path"]))
     features = geojson.get("features", [])
     if not features:
         raise ValueError("No region boundaries found for selected country.")
@@ -89,42 +90,27 @@ def plot_country_map(country: str) -> go.Figure:
     values = [(i % 9) + 1 for i, _ in enumerate(locations)]
 
     fig = go.Figure(
-        go.Choropleth(
+        go.Choroplethmapbox(
             geojson=geojson,
             locations=locations,
             z=values,
             text=labels,
             featureidkey=f"properties.{id_field}",
             hovertemplate="%{text}<extra></extra>",
-            marker_line_width=0.5,
+            marker_line_width=0.8,
             marker_line_color="#ffffff",
-            colorscale="Tealgrn",
+            colorscale="Viridis",
             showscale=False,
+            opacity=0.72,
         )
     )
-    fig.update_geos(
-        fitbounds="locations",
-        visible=False,
-        showcountries=False,
-        showcoastlines=False,
-        showframe=False,
-        bgcolor="rgba(0,0,0,0)",
-    )
     fig.update_layout(
-        height=260,
-        margin=dict(l=0, r=0, t=36, b=0),
+        height=320,
+        margin=dict(l=0, r=0, t=36, b=6),
         title=f"{country} states / regions",
-        annotations=[
-            dict(
-                x=0.5,
-                y=0.0,
-                xref="paper",
-                yref="paper",
-                text="Click-to-drilldown by region is planned for a future update.",
-                showarrow=False,
-                font=dict(size=10, color="#5f7285"),
-            )
-        ],
+        mapbox_style="carto-positron",
+        mapbox_zoom=config["zoom"],
+        mapbox_center=config["center"],
     )
     return fig
 
@@ -162,6 +148,7 @@ with right:
     st.subheader("Region map")
     selected_country = st.selectbox("Country", COUNTRIES, index=COUNTRIES.index("USA"))
     st.plotly_chart(plot_country_map(selected_country), use_container_width=True)
+    st.caption("Region click-to-drilldown will be added in a future iteration.")
 
 with mid:
     st.subheader("Dataset")
