@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -23,10 +24,10 @@ COUNTRY_SERIES_CONFIG = {
 }
 
 COUNTRY_MAP_CONFIG = {
-    "UK": {"iso3": "GBR"},
-    "USA": {"iso3": "USA"},
-    "France": {"iso3": "FRA"},
-    "Peru": {"iso3": "PER"},
+    "UK": {"geojson_path": DATA_DIR / "maps" / "uk_adm1.geojson"},
+    "USA": {"geojson_path": DATA_DIR / "maps" / "usa_adm1.geojson"},
+    "France": {"geojson_path": DATA_DIR / "maps" / "france_adm1.geojson"},
+    "Peru": {"geojson_path": DATA_DIR / "maps" / "peru_adm1.geojson"},
 }
 
 
@@ -64,17 +65,38 @@ def plot_history(df: pd.DataFrame, title: str):
     return fig
 
 
+@st.cache_data(show_spinner=False)
+def load_geojson(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def plot_country_map(country: str) -> go.Figure:
-    iso3 = COUNTRY_MAP_CONFIG[country]["iso3"]
+    geojson = load_geojson(str(COUNTRY_MAP_CONFIG[country]["geojson_path"]))
+    features = geojson.get("features", [])
+    if not features:
+        raise ValueError("No region boundaries found for selected country.")
+
+    id_field = "GID_1"
+    label_field = "NAME_1"
+    for feature in features:
+        props = feature.get("properties", {})
+        if id_field not in props or label_field not in props:
+            raise ValueError(f"GeoJSON for {country} is missing required region properties.")
+
+    locations = [feature["properties"][id_field] for feature in features]
+    labels = [feature["properties"][label_field] for feature in features]
+    values = [(i % 9) + 1 for i, _ in enumerate(locations)]
 
     fig = go.Figure(
         go.Choropleth(
-            locations=[iso3],
-            z=[1],
-            text=[country],
-            locationmode="ISO-3",
+            geojson=geojson,
+            locations=locations,
+            z=values,
+            text=labels,
+            featureidkey=f"properties.{id_field}",
             hovertemplate="%{text}<extra></extra>",
-            marker_line_width=1.0,
+            marker_line_width=0.5,
             marker_line_color="#ffffff",
             colorscale="Tealgrn",
             showscale=False,
@@ -83,8 +105,7 @@ def plot_country_map(country: str) -> go.Figure:
     fig.update_geos(
         fitbounds="locations",
         visible=False,
-        showcountries=True,
-        countrycolor="#5f7285",
+        showcountries=False,
         showcoastlines=False,
         showframe=False,
         bgcolor="rgba(0,0,0,0)",
@@ -92,14 +113,14 @@ def plot_country_map(country: str) -> go.Figure:
     fig.update_layout(
         height=260,
         margin=dict(l=0, r=0, t=36, b=0),
-        title=f"{country} map",
+        title=f"{country} states / regions",
         annotations=[
             dict(
                 x=0.5,
                 y=0.0,
                 xref="paper",
                 yref="paper",
-                text="Country overview (regional click support can be added next).",
+                text="Click-to-drilldown by region is planned for a future update.",
                 showarrow=False,
                 font=dict(size=10, color="#5f7285"),
             )
