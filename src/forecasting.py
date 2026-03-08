@@ -3,7 +3,7 @@ from __future__ import annotations
 import itertools
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -40,12 +40,28 @@ class ForecastingEngine:
         self.cv_splits = cv_splits
         self.lags = [1, 2, 3, 4, 5, 6, 52]
 
-    def run(self, train_df: pd.DataFrame, test_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, ModelResult]]:
+    def run(
+        self,
+        train_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+    ) -> Tuple[pd.DataFrame, Dict[str, ModelResult]]:
         train_series = train_df.set_index("date")["demand"]
         test_series = test_df.set_index("date")["demand"]
 
+        def notify(progress: float, message: str) -> None:
+            if progress_callback is None:
+                return
+            bounded = min(max(progress, 0.0), 1.0)
+            progress_callback(bounded, message)
+
+        model_grids = self._model_grids()
+        total_models = max(1, len(model_grids))
+        notify(0.0, "Preparing forecasting pipeline...")
+
         results: Dict[str, ModelResult] = {}
-        for name, param_grid in self._model_grids().items():
+        for idx, (name, param_grid) in enumerate(model_grids.items(), start=1):
+            notify((idx - 1) / total_models, f"Running {name} model ({idx}/{total_models})...")
             try:
                 best_params, cv_score = self._select_best_params(name, train_series, param_grid)
                 forecast_df, fitted_model = self._fit_and_forecast(name, train_series, test_series.index, best_params)
@@ -67,6 +83,7 @@ class ForecastingEngine:
                     cv_score=np.nan,
                     fitted_model=None,
                 )
+            notify(idx / total_models, f"Finished {name} model ({idx}/{total_models}).")
 
         summary = pd.DataFrame(
             [
@@ -88,6 +105,7 @@ class ForecastingEngine:
             if pd.notna(best_idx):
                 summary.loc[best_idx, "Best Model"] = "★"
 
+        notify(1.0, "Forecasting completed.")
         return summary, results
 
     def _model_grids(self) -> Dict[str, List[Dict[str, Any]]]:
